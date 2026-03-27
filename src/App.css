@@ -40,6 +40,13 @@ body {
   gap: 10px;
 }
 
+.editor {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 56px;
+}
+
 .row {
   display: flex;
   gap: 10px;

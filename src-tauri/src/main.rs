@@ -68,7 +68,16 @@ fn parse_rag_base_path_from_env(env_path: &Path) -> Result<String, String> {
 
 fn diary_dir_from_env_path(env_path: &Path) -> Result<String, String> {
     let base = parse_rag_base_path_from_env(env_path)?;
-    Ok(Path::new(&base)
+    let base_path = Path::new(&base);
+    let resolved_base = if base_path.is_absolute() {
+        base_path.to_path_buf()
+    } else {
+        let parent = env_path
+            .parent()
+            .ok_or_else(|| "无法确定 .env 所在目录".to_string())?;
+        parent.join(base_path)
+    };
+    Ok(resolved_base
         .join(DIARY_DIR_NAME)
         .to_string_lossy()
         .to_string())
@@ -467,6 +476,16 @@ mod tests {
         assert_eq!(title, "2026年3月27日日记");
         assert_eq!(file, "2026年3月27日日记.md");
         assert_eq!(date.year(), 2026);
+    }
+
+    #[test]
+    fn relative_rag_base_path_should_resolve_from_env_parent() {
+        let raw = "RAG_BASE_PATH=./data/knowledge\n";
+        let env_dir = make_temp_dir("env_relative");
+        let real_env = env_dir.join(".env");
+        fs::write(&real_env, raw).expect("write env");
+        let diary_dir = diary_dir_from_env_path(&real_env).expect("resolve diary dir");
+        assert!(diary_dir.replace("\\", "/").ends_with("/data/knowledge/日记"));
     }
 }
 
