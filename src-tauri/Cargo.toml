@@ -1,9 +1,10 @@
 [package]
 name = "diary-widget"
 version = "0.1.0"
-description = "Windows desktop diary widget"
+description = "Desktop diary widget"
 authors = ["liyu8"]
 edition = "2021"
+rust-version = "1.80"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -14,9 +15,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
-anyhow = "1"
-gray_matter = "0.2"
-yaml-rust2 = "0.8"
-serde_yaml = "0.9"
+dirs = "5"
