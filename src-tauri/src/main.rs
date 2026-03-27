@@ -39,11 +39,27 @@ struct EntrySection {
     raw: String,
 }
 
-fn app_config_file() -> Result<PathBuf, String> {
-    let appdata = std::env::var("APPDATA").map_err(|_| "无法读取 APPDATA 环境变量".to_string())?;
-    let dir = Path::new(&appdata).join("diary-widget");
+fn app_config_dir() -> Result<PathBuf, String> {
+    let base = if cfg!(target_os = "windows") {
+        std::env::var("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                dirs::config_dir().unwrap_or_else(|| PathBuf::from("."))
+            })
+    } else {
+        dirs::config_dir().unwrap_or_else(|| {
+            dirs::home_dir()
+                .map(|h| h.join(".config"))
+                .unwrap_or_else(|| PathBuf::from("."))
+        })
+    };
+    let dir = base.join("diary-widget");
     fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
-    Ok(dir.join("config.json"))
+    Ok(dir)
+}
+
+fn app_config_file() -> Result<PathBuf, String> {
+    Ok(app_config_dir()?.join("config.json"))
 }
 
 fn parse_rag_base_path_from_env(env_path: &Path) -> Result<String, String> {
@@ -85,7 +101,7 @@ fn diary_dir_from_env_path(env_path: &Path) -> Result<String, String> {
 
 fn read_cached_config() -> Result<StoredConfig, String> {
     let cfg = app_config_file()?;
-    let raw = fs::read_to_string(cfg).map_err(|e| format!("读取配置缓存失败: {e}"))?;
+    let raw = fs::read_to_string(&cfg).map_err(|e| format!("读取配置缓存失败: {e}"))?;
     serde_json::from_str::<StoredConfig>(&raw).map_err(|e| format!("解析配置缓存失败: {e}"))
 }
 
@@ -94,12 +110,15 @@ fn save_cached_config(env_file_path: &Path) -> Result<(), String> {
     let payload = StoredConfig {
         env_file_path: env_file_path.to_string_lossy().to_string(),
     };
-    let json = serde_json::to_string_pretty(&payload).map_err(|e| format!("序列化配置失败: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(&payload).map_err(|e| format!("序列化配置失败: {e}"))?;
     fs::write(cfg, json).map_err(|e| format!("写入配置缓存失败: {e}"))
 }
 
 fn shift_headings_down_one_if_has_h1(content: &str) -> (String, bool) {
-    let has_h1 = Regex::new(r"(?m)^#\s+[^#]").expect("regex compile").is_match(content);
+    let has_h1 = Regex::new(r"(?m)^#\s+[^#]")
+        .expect("regex compile")
+        .is_match(content);
     if !has_h1 {
         return (content.to_string(), false);
     }
@@ -166,11 +185,9 @@ fn build_entry_block(time: &str, shifted_content: &str, title: &str) -> String {
 }
 
 fn should_append_without_sorting(existing_entries: &[EntrySection], new_time_minutes: i32) -> bool {
-    if existing_entries.is_empty() {
-        return false;
-    }
-    let last = existing_entries.last().expect("last entry exists");
-    new_time_minutes >= last.time_minutes
+    existing_entries
+        .last()
+        .map_or(false, |last| new_time_minutes >= last.time_minutes)
 }
 
 fn date_title_and_filename(date: &NaiveDate) -> (String, String) {
@@ -179,23 +196,27 @@ fn date_title_and_filename(date: &NaiveDate) -> (String, String) {
     (title, file_name)
 }
 
-fn write_diary_to_file(base_diary_dir: &Path, payload: &WriteDiaryPayload) -> Result<PathBuf, String> {
+fn write_diary_to_file(
+    base_diary_dir: &Path,
+    payload: &WriteDiaryPayload,
+) -> Result<PathBuf, String> {
     let date = NaiveDate::parse_from_str(payload.date.trim(), "%Y-%m-%d")
         .map_err(|_| "date 格式应为 YYYY-MM-DD".to_string())?;
-    let time_parts: Vec<_> = payload.time.trim().split(':').collect();
+
+    let time_parts: Vec<&str> = payload.time.trim().split(':').collect();
     if time_parts.len() != 2 {
         return Err("time 格式应为 HH:MM".to_string());
     }
     let hour: i32 = time_parts[0]
-        .parse::<i32>()
+        .parse()
         .map_err(|_| "time 小时无效".to_string())?;
     let minute: i32 = time_parts[1]
-        .parse::<i32>()
+        .parse()
         .map_err(|_| "time 分钟无效".to_string())?;
     if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
         return Err("time 超出有效范围".to_string());
     }
-    let time_str = format!("{:02}:{:02}", hour, minute);
+    let time_str = format!("{hour:02}:{minute:02}");
     let new_minutes = hour * 60 + minute;
 
     fs::create_dir_all(base_diary_dir).map_err(|e| format!("创建日记目录失败: {e}"))?;
@@ -216,12 +237,15 @@ fn write_diary_to_file(base_diary_dir: &Path, payload: &WriteDiaryPayload) -> Re
         });
         format!(
             "---\n{}\n---\n\n{}",
-            serde_yaml::to_string(&frontmatter).map_err(|e| format!("序列化 frontmatter 失败: {e}"))?,
+            serde_yaml::to_string(&frontmatter)
+                .map_err(|e| format!("序列化 frontmatter 失败: {e}"))?,
             entry_block.trim_end()
         ) + "\n"
     } else {
-        let existing = fs::read_to_string(&file_path).map_err(|e| format!("读取日记文件失败: {e}"))?;
-        let fm_re = Regex::new(r"(?s)^---\s*\n(.*?)\n---\s*\n?").expect("frontmatter regex");
+        let existing =
+            fs::read_to_string(&file_path).map_err(|e| format!("读取日记文件失败: {e}"))?;
+        let fm_re =
+            Regex::new(r"(?s)^---\s*\n(.*?)\n---\s*\n?").expect("frontmatter regex");
         let (existing_fm, body) = if let Some(caps) = fm_re.captures(&existing) {
             let whole = caps.get(0).map(|x| x.as_str()).unwrap_or("");
             let front = caps.get(1).map(|x| x.as_str()).unwrap_or("");
@@ -233,7 +257,9 @@ fn write_diary_to_file(base_diary_dir: &Path, payload: &WriteDiaryPayload) -> Re
         let mut fm_value: serde_yaml::Value = if existing_fm.trim().is_empty() {
             serde_yaml::to_value(serde_json::json!({})).expect("empty yaml")
         } else {
-            serde_yaml::from_str(&existing_fm).unwrap_or_else(|_| serde_yaml::to_value(serde_json::json!({})).expect("yaml object"))
+            serde_yaml::from_str(&existing_fm).unwrap_or_else(|_| {
+                serde_yaml::to_value(serde_json::json!({})).expect("yaml object")
+            })
         };
 
         let (prefix, entries) = parse_diary_body_entries(&body);
@@ -242,34 +268,42 @@ fn write_diary_to_file(base_diary_dir: &Path, payload: &WriteDiaryPayload) -> Re
 
         if let serde_yaml::Value::Mapping(ref mut map) = fm_value {
             map.insert(
-                serde_yaml::Value::String("title".to_string()),
+                serde_yaml::Value::String("title".into()),
                 serde_yaml::Value::String(diary_title.clone()),
             );
             map.insert(
-                serde_yaml::Value::String("date".to_string()),
+                serde_yaml::Value::String("date".into()),
                 serde_yaml::Value::String(date.format("%Y-%m-%d").to_string()),
             );
             map.insert(
-                serde_yaml::Value::String("tags".to_string()),
+                serde_yaml::Value::String("tags".into()),
                 serde_yaml::to_value(vec!["日记"]).expect("yaml tags"),
             );
             map.insert(
-                serde_yaml::Value::String("entryCount".to_string()),
+                serde_yaml::Value::String("entryCount".into()),
                 serde_yaml::Value::Number(serde_yaml::Number::from(next_count as i64)),
             );
             map.insert(
-                serde_yaml::Value::String("lastModified".to_string()),
+                serde_yaml::Value::String("lastModified".into()),
                 serde_yaml::Value::String(now_iso.clone()),
             );
         }
 
         let new_body = if append_without_sort {
             let base = if prefix.is_empty() {
-                entries.iter().map(|e| e.raw.clone()).collect::<Vec<_>>().join("\n\n")
+                entries
+                    .iter()
+                    .map(|e| e.raw.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
             } else {
                 format!(
                     "{prefix}\n\n{}",
-                    entries.iter().map(|e| e.raw.clone()).collect::<Vec<_>>().join("\n\n")
+                    entries
+                        .iter()
+                        .map(|e| e.raw.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n\n")
                 )
             };
             format!("{}\n\n{}", base.trim_end(), entry_block.trim_end())
@@ -294,7 +328,8 @@ fn write_diary_to_file(base_diary_dir: &Path, payload: &WriteDiaryPayload) -> Re
 
         format!(
             "---\n{}\n---\n\n{}\n",
-            serde_yaml::to_string(&fm_value).map_err(|e| format!("写回 frontmatter 失败: {e}"))?,
+            serde_yaml::to_string(&fm_value)
+                .map_err(|e| format!("写回 frontmatter 失败: {e}"))?,
             new_body.trim_end()
         )
     };
@@ -341,11 +376,16 @@ fn write_diary(payload: WriteDiaryPayload) -> Result<WriteDiaryResponse, String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Datelike;
 
     fn make_temp_dir(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("diary_widget_test_{}_{}", name, Local::now().timestamp_nanos_opt().unwrap_or_default()));
+        p.push(format!(
+            "diary_widget_test_{}_{}",
+            name,
+            Local::now()
+                .timestamp_nanos_opt()
+                .unwrap_or_default()
+        ));
         fs::create_dir_all(&p).expect("create temp");
         p
     }
@@ -485,7 +525,9 @@ mod tests {
         let real_env = env_dir.join(".env");
         fs::write(&real_env, raw).expect("write env");
         let diary_dir = diary_dir_from_env_path(&real_env).expect("resolve diary dir");
-        assert!(diary_dir.replace("\\", "/").ends_with("/data/knowledge/日记"));
+        assert!(diary_dir
+            .replace("\\", "/")
+            .ends_with("/data/knowledge/日记"));
     }
 }
 
